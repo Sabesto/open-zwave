@@ -62,7 +62,7 @@ enum MeterType
 
 enum
 {
-	MeterIndex_Exporting = 32,
+	MeterIndex_Exporting = 64,
 	MeterIndex_Reset
 };
 
@@ -84,6 +84,14 @@ static char const* c_electricityUnits[] =
 	"V",
 	"A",
 	"Power Factor",
+	"",
+	"kVar",
+	"kVarh",
+	"",
+	"",
+	"",
+	"",
+	"",
 	""
 };
 
@@ -93,6 +101,14 @@ static char const* c_gasUnits[] =
 	"cubic feet",
 	"",
 	"pulses",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
 	"",
 	"",
 	"",
@@ -108,6 +124,14 @@ static char const* c_waterUnits[] =
 	"",
 	"",
 	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
 	""
 };
 
@@ -120,7 +144,15 @@ static char const* c_electricityLabels[] =
 	"Voltage",
 	"Current",
 	"Power Factor",
-	"Unknown"
+	"Unknown1",
+	"Power",
+	"Energy",
+	"Unknown2",
+	"Unknown3",
+	"Unknown4",
+	"Unknown5",
+	"Unknown6",
+	"Unknown7"
 };
 
 //-----------------------------------------------------------------------------
@@ -191,24 +223,42 @@ bool Meter::RequestValue
 		Log::Write(  LogLevel_Info, GetNodeId(), "MeterCmd_Get Not Supported on this node");
 		return false;
 	}
-	for( uint8 i=0; i<8; ++i )
+	for( uint8 i=0; i<16; ++i )
 	{
-		uint8 baseIndex = i<<2;
-
-		Value* value = GetValue( _instance, baseIndex );
-		if( value != NULL )
+		// Bit 7 is the M.S.T flag (More Scale Types)
+		if( i != 7 )
 		{
-			value->Release();
-			Msg* msg = new Msg( "MeterCmd_Get", GetNodeId(), REQUEST, FUNC_ID_ZW_SEND_DATA, true, true, FUNC_ID_APPLICATION_COMMAND_HANDLER, GetCommandClassId() );
-			msg->SetInstance( this, _instance );
-			msg->Append( GetNodeId() );
-			msg->Append( 3 );
-			msg->Append( GetCommandClassId() );
-			msg->Append( MeterCmd_Get );
-			msg->Append( (uint8)( i << 3 ) );
-			msg->Append( GetDriver()->GetTransmitOptions() );
-			GetDriver()->SendMsg( msg, _queue );
-			res |= true;
+			uint8 baseIndex = i<<2;
+
+			Value* value = GetValue( _instance, baseIndex );
+			if( value != NULL )
+			{
+				value->Release();
+				Msg* msg = new Msg( "MeterCmd_Get", GetNodeId(), REQUEST, FUNC_ID_ZW_SEND_DATA, true, true, FUNC_ID_APPLICATION_COMMAND_HANDLER, GetCommandClassId() );
+				msg->SetInstance( this, _instance );
+				msg->Append( GetNodeId() );
+
+				// Scale larger then 7, send extra scales byte
+				if( i > 7)
+				{
+					msg->Append( 4 );
+					msg->Append( GetCommandClassId() );
+					msg->Append( MeterCmd_Get );
+					msg->Append( 0x01<<6 | 0x07<<3 );
+					msg->Append( (uint8) (i - 8) );
+				}
+				else
+				{
+					msg->Append( 3 );
+					msg->Append( GetCommandClassId() );
+					msg->Append( MeterCmd_Get );
+					msg->Append( ( 0x01<<6 | (( (uint8)i & 0x07) <<3)) );
+				}
+
+				msg->Append( GetDriver()->GetTransmitOptions() );
+				GetDriver()->SendMsg( msg, _queue );
+				res |= true;
+			}
 		}
 	}
 	return res;
@@ -264,15 +314,26 @@ bool Meter::HandleSupportedReport
 		string msg;
 		msg = c_meterTypes[meterType];
 		msg += ": ";
-		// Create the list of supported scales
-		uint8 scaleSupported = _data[2];
+		// Create the list of supported scales, bit 7 is M.S.T flag
+		uint16 scaleSupported = _data[2] & 0x7f;
 		if( GetVersion() == 2 )
 		{
 			// Only four scales are allowed in version 2
 			scaleSupported &= 0x0f;
 		}
+		if( GetVersion() == 4 &&  _data[2] & (1<<7) )
+		{
+			// If bit 7 in the scale supported byte is set (M.S.T, More Scale Types),
+			// the command will follow
+			if( _data[3] == 0x01 )
+			{
+				scaleSupported |= _data[4] << 8;
+			}
 
-		for( uint8 i=0; i<8; ++i )
+			//scaleSupported &= 0x0f;
+		}
+
+		for( uint8 i=0; i<16; ++i )
 		{
 			if( scaleSupported & (1<<i) )
 			{
@@ -453,8 +514,17 @@ bool Meter::HandleReport
 			scale |= ((_data[1]&0x80)>>5);
 			baseIndex = scale << 2;
 		}
-
-		if( ValueDecimal* value = static_cast<ValueDecimal*>( GetValue( _instance, baseIndex ) ) )
+		if( GetVersion() > 3 && scale == 0x07)
+		{
+			// In version 4, an extra scale byte is sent if the scale(2:0) bits == 7
+			scale += _data[_length-2]+1;
+			baseIndex = scale << 2;
+		}
+		if( exporting && GetVersion() == 4)
+		{
+			Log::Write (LogLevel_Warning, GetNodeId(), "Rate type is exporting, ignoring");
+		}
+		else if( ValueDecimal* value = static_cast<ValueDecimal*>( GetValue( _instance, baseIndex ) ) )
 		{
 			Log::Write( LogLevel_Info, GetNodeId(), "Received Meter report from node %d: %s%s=%s%s", GetNodeId(), exporting ? "Exporting ": "", value->GetLabel().c_str(), valueStr.c_str(), value->GetUnits().c_str() );
 			value->OnValueRefreshed( valueStr );
